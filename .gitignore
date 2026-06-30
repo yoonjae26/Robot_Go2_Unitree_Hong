@@ -37,3 +37,22 @@ __pycache__
 
 # python
 dist/
+
+# virtual environments
+venv/
+.venv/
+
+# local environment secrets
+.env
+.env.*
+!.env.example
+
+# runtime logs
+logs/*.log
+logs/
+
+# local data and model caches
+Llama3/
+
+# Test / experimental directories
+Test/
