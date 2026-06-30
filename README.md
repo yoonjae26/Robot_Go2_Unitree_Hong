@@ -1,6 +1,68 @@
 # unitree_sdk2_python
 Python interface for unitree sdk2
 
+## 🎤 Korean Voice Control for Go2 (한국어 음성 제어)
+
+Control the Unitree Go2 robot with Korean voice commands via OpenAI Whisper STT and GPT-4o.
+
+**Pipeline:**
+```
+🎤 한국어 음성 → Whisper STT → OpenAI GPT-4o → JSON → RobotController → 🤖 Go2 → 🔊 TTS
+```
+
+### Quick Start
+
+```bash
+# Set OpenAI API key
+export OPENAI_API_KEY="your_openai_api_key"
+
+# Full pipeline with TTS feedback (recommended)
+python3 main_go2.py --mode pipeline
+
+# Voice control only (no TTS)
+python3 main_go2.py --mode interactive
+
+# Test robot commands (no voice needed)
+python3 main_go2.py --mode test --robot-ip 192.168.12.1
+```
+
+### Voice Command Examples (한국어)
+
+| 말하기 | 행동 |
+|--------|------|
+| "하트 포즈하고 점프해" | balanced_stand → free_jump (sequence) |
+| "앞으로 가" | move forward |
+| "점프" | free_jump |
+| "백플립" | back_flip |
+| "물구나무" | hand_stand |
+| "멈춰" | stop_move |
+| "종료" | exit session |
+
+### Dependencies
+
+```bash
+pip install openai>=1.0.0 faster-whisper sounddevice numpy
+# Audio playback (one of):
+apt install ffmpeg   # Linux
+```
+
+### Files
+
+| File | Description |
+|------|-------------|
+| `main_go2.py` | Entry point — `--mode pipeline/interactive/test` |
+| `full_voice_pipeline.py` | Full STT → LLM → Robot → TTS pipeline |
+| `voice_control_go2.py` | Voice control core + Korean system prompt |
+| `robot_controller.py` | High-level robot action interface |
+| `behavior_executor.py` | SportClient execution layer |
+| `behavior_schema.py` | Action definitions with Korean voice commands |
+| `behavior_library.py` | Action registry by category |
+| `action_registry.py` | Fast action lookup by name/alias/mode_id |
+| `realtime_stt_pipeline.py` | Whisper STT pipeline (Korean) |
+| `go2_agent/main.py` | Advanced agent with state tracking |
+
+---
+
 # Installation
 ## Dependencies
 - Python >= 3.8
@@ -111,3 +173,4 @@ Replace `enp2s0` with the name of the network interface to which the robot is co
 python3 ./example/vui_client/vui_client_example.py enp2s0
 ```
 Replace `enp2s0` with the name of the network interface to which the robot is connected.T he robot will cycle the volume and light brightness. The interface is detailed at https://support.unitree.com/home/en/developer/VuiClient
+# Robot_Go2_Unitree_Hong
