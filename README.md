@@ -1,35 +1,240 @@
-# unitree_sdk2_python
-Python interface for unitree sdk2
+# Go2 AI Dashboard — Unitree SDK2 Python + Custom Robot App
 
-## 🎤 Korean Voice Control for Go2 (한국어 음성 제어)
+Python interface for the Unitree SDK2, extended with a full application layer
+for the **Unitree Go2** quadruped: a web dashboard, bilingual (Korean /
+Vietnamese) voice control, autonomous patrol, SLAM waypoint navigation, face
+recognition, beat-synced dance, and — the centerpiece — a **three-layer
+runtime safety-verification pipeline** that checks every LLM-generated
+command before it reaches the robot, plus a hardware-independent emergency
+stop that works even if the LLM is compromised.
 
-Control the Unitree Go2 robot with Korean voice commands via OpenAI Whisper STT and GPT-4o.
+The vendor SDK (`unitree_sdk2py/`, `example/`) is the official
+[unitreerobotics/unitree_sdk2_python](https://github.com/unitreerobotics/unitree_sdk2_python)
+and is unmodified. Everything under `app/`, `benchmarks/`, and `docs/` is
+custom, built on top of it.
 
-**Pipeline:**
+![Dashboard walkthrough](docs/demo/dashboard_walkthrough.gif)
+
+*Dashboard UI walking through its tabs — recorded with no robot connected, so
+the camera panel shows "no signal"; every control, the AI command panel, the
+D-pad, SLAM waypoints and the analytics view are the real, running app.*
+
+## Table of Contents
+
+- [Key Features](#key-features)
+- [Screenshot](#screenshot)
+- [Project Structure](#project-structure)
+- [The Safety Verification Pipeline](#the-safety-verification-pipeline)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Quick Start — Web Dashboard](#quick-start--web-dashboard-recommended)
+- [Quick Start — Terminal / Legacy CLI](#quick-start--terminal-mode-legacy)
+- [Voice Command Examples](#voice-command-examples-한국어)
+- [Testing & Benchmarks](#testing--benchmarks)
+- [Network Modes (LAN vs. WiFi Hotspot)](#network-modes-lan-vs-wifi-hotspot)
+- [Known Limitations](#known-limitations--honesty-notes)
+- [Credits](#credits)
+- [Vendor SDK Reference](#vendor-sdk-reference-original-unitree-documentation)
+- [License](#license)
+
+## Key Features
+
+| Area | What it does | Where |
+|---|---|---|
+| 🎙️ **Voice control** | Korean/Vietnamese speech → Whisper STT → GPT-4o-mini → structured action sequence → robot, with TTS feedback | `app/voice/` |
+| 🖥️ **Web dashboard** | Single-page control center: live camera, AI command panel, manual D-pad, patrol, person tracking, SLAM map, analytics | `app/web/dashboard_server.py` |
+| 🛡️ **Runtime safety verification** | Three independent layers (schema → intent → context) gate every generated command; see below | `app/safety/` |
+| 🧍 **Hard person-safety gate** | Camera-based YOLO person detection that blocks forward motion — deliberately **not** LLM-based, so its failure modes are uncorrelated with the LLM's | `app/vision/person_safety_gate.py` |
+| 🚶 **Autonomous patrol** | Fixed-route patrol with face recognition and a spoken scene report when it encounters a person | `app/navigation/auto_patrol.py` |
+| 🗺️ **SLAM navigation** | Drive to a named, saved waypoint using the onboard L1 lidar's SLAM pose | `app/navigation/slam_navigator.py` |
+| 👁️ **Person following** | YOLO + ByteTrack-based "follow me" with a tuned turn/creep controller | `app/web/dashboard_server.py` (`PersonTracker`) |
+| 🙂 **Face recognition** | Register a person by name/title once; the robot recognizes and greets them afterward | `app/vision/camera_vision_download/` |
+| 💃 **Beat-synced dance** | LLM-choreographed, beat-detected dance routines from an arbitrary audio file | `app/dance/` |
+| 📊 **Analytics** | Every command's latency, success/failure, and safety-layer verdict logged to SQLite and shown in the dashboard | `app/analytics/` |
+
+## Screenshot
+
+![Dashboard screenshot](docs/demo/dashboard_screenshot.png)
+
+The original design mockup this UI was built from is in
+[`docs/design/`](docs/design/).
+
+## Project Structure
+
 ```
-🎤 한국어 음성 → Whisper STT → OpenAI GPT-4o → JSON → RobotController → 🤖 Go2 → 🔊 TTS
+unitree_sdk2_python/
+├── unitree_sdk2py/              Official Unitree SDK2 — unmodified
+├── example/                     Official SDK examples (helloworld, high/low level, ...)
+├── vendor/
+│   └── unitree_webrtc_connect/  Vendored WebRTC client, used when the robot
+│                                 is reached over its own WiFi hotspot (the
+│                                 DDS RPC services aren't reachable there)
+│
+├── app/                          ← custom application layer
+│   ├── core/        robot_controller, action_registry/_merge, behavior_schema/
+│   │                 _library/_executor, webrtc_sport_client — the action
+│   │                 layer every other subsystem calls to move the robot
+│   ├── voice/        voice_control_go2, realtime_stt_pipeline (Whisper STT),
+│   │                 wake_word_listener, webrtc_audio_hub (TTS), full_voice_pipeline
+│   ├── vision/        camera_vision_download/ (face recognition), camera_stream,
+│   │                 person_safety_gate (hard, non-LLM safety gate)
+│   ├── navigation/   slam_navigator, auto_patrol, lidar_off, waypoints.json
+│   ├── safety/        runtime_verification (V_s/V_i/V_c pipeline),
+│   │                 verification_config, intent_verifier
+│   ├── analytics/     command history / latency / safety-rejection log (SQLite)
+│   ├── dance/         beat-synced choreography (LLM-generated, cached)
+│   ├── web/           dashboard_server.py — the main entry point
+│   ├── legacy/        main_go2.py, go2_agent/ — terminal-only mode that
+│   │                 pre-dates the dashboard; still works
+│   ├── tools/         one-off diagnostic scripts (test_wifi_dds.py, ...)
+│   ├── archive/       superseded prototypes, kept for history
+│   └── tests/         plain-assert test scripts
+│
+├── benchmarks/        Verification-pipeline benchmark harness + corpus + results
+└── docs/               README extras, demo media, presentation, figures
 ```
 
-### Quick Start
+## The Safety Verification Pipeline
+
+This is the part of the project that differs most from a typical "LLM calls
+robot API" demo. A command generated by the LLM is not trusted by default —
+it passes through `verify_sequence()` (`app/safety/runtime_verification.py`),
+which evaluates three independent layers **in cost order**, short-circuiting
+at the first rejection:
+
+1. **V_s — Schema** (local, cheapest): are the action names and parameters
+   within valid, declared ranges?
+2. **V_i — Intent consistency** (one LLM call, independent of the generator):
+   does the chosen action sequence plausibly match what the user actually
+   asked for? Catches a generator that quietly does something unrelated to
+   the instruction.
+3. **V_c — Context-aware gating** (telemetry read): is the command safe
+   *given current robot state* — battery level, obstacle distance, posture?
+
+Each layer can be toggled independently (`app/safety/verification_config.py`)
+to reproduce the paper's C0–C3 ablation configurations, and
+`benchmarks/run_verification_benchmark.py` runs the full corpus through all
+of them, dry-run by default (no hardware touched), to produce accept/reject
+and per-layer-latency numbers.
+
+**Crucially, none of this protects against a user who directly and
+unambiguously asks the robot to do something unsafe** — a consistency check
+can't catch "the robot correctly did what was asked." That's handled by a
+completely separate mechanism: `app/vision/person_safety_gate.py` is a
+**hard, non-LLM gate** — plain YOLO person detection on the live camera
+frame — that refuses a forward move if a person is directly in the robot's
+path, regardless of what any LLM says. It never reads the instruction text,
+so its failure modes are not correlated with the LLM generator's or
+verifier's.
 
 ```bash
-# Set OpenAI API key
-export OPENAI_API_KEY="your_openai_api_key"
-
-# Full pipeline with TTS feedback (recommended)
-python3 main_go2.py --mode pipeline
-
-# Voice control only (no TTS)
-python3 main_go2.py --mode interactive
-
-# Test robot commands (no voice needed)
-python3 main_go2.py --mode test --robot-ip 192.168.12.1
+python3 app/tests/test_runtime_verification.py
+python3 app/tests/test_person_safety_gate.py
 ```
 
-### Voice Command Examples (한국어)
+## Requirements
 
-| 말하기 | 행동 |
-|--------|------|
+- Python >= 3.8 (tested on 3.10)
+- Ubuntu 20.04/22.04 recommended (matches the vendor SDK's tested environment)
+- A Unitree Go2 (any variant) reachable either via Ethernet (`192.168.123.x`)
+  or its own WiFi hotspot (`192.168.12.x`) — see
+  [Network Modes](#network-modes-lan-vs-wifi-hotspot)
+- An OpenAI API key (voice understanding, intent verification, scene
+  description)
+- A microphone/speakers if you want voice control from your own machine
+  (the dashboard also supports the robot's onboard mic for wake-word)
+
+## Installation
+
+```bash
+git clone <this-repo-url>
+cd unitree_sdk2_python
+
+# 1. Vendor SDK (talks to the robot over DDS)
+pip3 install -e .
+# If this fails with "Could not locate cyclonedds", see the FAQ in
+# [Vendor SDK Reference](#vendor-sdk-reference-original-unitree-documentation).
+
+# 2. Vendored WebRTC client (talks to the robot over its own WiFi hotspot)
+pip3 install -e vendor/unitree_webrtc_connect
+
+# 3. Application dependencies
+pip3 install -r requirements.txt
+```
+
+## Configuration
+
+```bash
+cp .env.example .env
+# then edit .env and set:
+#   OPENAI_API_KEY="sk-..."
+```
+
+Every entry point loads `.env` by searching **upward from the current
+working directory**, so placing it at the repo root (as above) works
+regardless of which subfolder you run a script from. You can also pass the
+key directly: `--openai-key sk-...` on most entry points, or export
+`OPENAI_API_KEY` in your shell.
+
+> `.env` is git-ignored (see `.gitignore`) and must never be committed. If
+> you fork or copy this project, double-check `git log -p -- .env` on your
+> own history before making a private clone public.
+
+## Quick Start — Web Dashboard (recommended)
+
+```bash
+export OPENAI_API_KEY="sk-..."
+python3 app/web/dashboard_server.py --robot-ip 192.168.123.18
+# open http://localhost:8080
+```
+
+Voice control, person-following, auto-patrol, SLAM waypoint navigation,
+safety-verification stats and analytics are all available from this one
+dashboard.
+
+```bash
+python3 app/web/dashboard_server.py --help
+```
+
+```
+--robot-ip IP        Robot address (default 192.168.123.18, LAN mode)
+--robot-name NAME     Display name shown in the UI (default GO2-01)
+--port PORT           Dashboard HTTP port (default 8080)
+--openai-key KEY      Overrides OPENAI_API_KEY
+--model MODEL         OpenAI model for command generation (default gpt-4o-mini)
+--no-wake-word         Disable the always-listening wake word (WiFi mode only)
+```
+
+## Quick Start — Terminal Mode (legacy)
+
+A terminal-only mode that pre-dates the dashboard. Still fully functional —
+useful if you don't want to run a web server, or want a minimal reference
+for building your own integration.
+
+```bash
+export OPENAI_API_KEY="sk-..."
+
+# Full pipeline with TTS feedback
+python3 app/legacy/main_go2.py --mode pipeline
+
+# Voice control only (no TTS)
+python3 app/legacy/main_go2.py --mode interactive
+
+# Test robot commands without a microphone
+python3 app/legacy/main_go2.py --mode test --robot-ip 192.168.12.1
+```
+
+**Pipeline:** 🎤 voice → Whisper STT → OpenAI GPT-4o → structured JSON →
+`RobotController` → 🤖 Go2 → 🔊 TTS.
+
+See [`docs/VOICE_CONTROL_README.md`](docs/VOICE_CONTROL_README.md) for the
+full write-up, including the intelligent-agent mode (`app/legacy/go2_agent/`).
+
+## Voice Command Examples (한국어)
+
+| Say | Action |
+|---|---|
 | "하트 포즈하고 점프해" | balanced_stand → free_jump (sequence) |
 | "앞으로 가" | move forward |
 | "점프" | free_jump |
@@ -38,48 +243,82 @@ python3 main_go2.py --mode test --robot-ip 192.168.12.1
 | "멈춰" | stop_move |
 | "종료" | exit session |
 
-### Dependencies
+## Testing & Benchmarks
+
+None of these touch the physical robot unless `--live` is explicitly passed.
 
 ```bash
-pip install openai>=1.0.0 faster-whisper sounddevice numpy
-# Audio playback (one of):
-apt install ffmpeg   # Linux
+python3 app/tests/test_voice_control_setup.py   # environment/dependency check
+python3 app/tests/test_go2_behaviors.py
+python3 app/tests/test_runtime_verification.py
+python3 app/tests/test_person_safety_gate.py
+
+# Verification-pipeline benchmark (dry-run by default)
+python3 benchmarks/run_verification_benchmark.py --configs C1
+python3 benchmarks/run_verification_benchmark.py --configs C0 C1 C2 C3 --repeats 3
+
+# Add --live --robot-ip <ip> for physical-latency numbers on real hardware,
+# and --confirm-each-action to approve every command by hand first.
 ```
 
-### Files
+## Network Modes (LAN vs. WiFi Hotspot)
 
-| File | Description |
-|------|-------------|
-| `main_go2.py` | Entry point — `--mode pipeline/interactive/test` |
-| `full_voice_pipeline.py` | Full STT → LLM → Robot → TTS pipeline |
-| `voice_control_go2.py` | Voice control core + Korean system prompt |
-| `robot_controller.py` | High-level robot action interface |
-| `behavior_executor.py` | SportClient execution layer |
-| `behavior_schema.py` | Action definitions with Korean voice commands |
-| `behavior_library.py` | Action registry by category |
-| `action_registry.py` | Fast action lookup by name/alias/mode_id |
-| `realtime_stt_pipeline.py` | Whisper STT pipeline (Korean) |
-| `go2_agent/main.py` | Advanced agent with state tracking |
+The Go2 exposes two different connection paths, and the app auto-detects
+which one it's talking to based on the IP you pass:
+
+| | Ethernet / LAN (`192.168.123.x`) | Robot's own WiFi hotspot (`192.168.12.x`) |
+|---|---|---|
+| Transport | Raw DDS (`unitree_sdk2py`) | WebRTC data channel (`vendor/unitree_webrtc_connect/`) |
+| Typical use | Development on a desk, cable to the robot | Field use, no cable |
+| Wake word / onboard mic | Not available | Available (`--no-wake-word` to disable) |
+
+If you see a DDS RPC timeout (`RPC_ERR_CLIENT_SEND`, code 3102) while on
+WiFi, that's expected — the DDS services aren't reachable through the
+hotspot; everything in this app already routes through WebRTC automatically
+in that case.
+
+## Known Limitations / Honesty Notes
+
+This project is transparent in its own code comments about what has and
+hasn't been validated on real hardware — worth repeating here rather than
+overselling in a README:
+
+- `app/navigation/auto_patrol.py` is an explicit v1: a fixed there-and-back
+  route, not closed-loop SLAM — see its module docstring for why.
+- `app/navigation/slam_navigator.py`'s control loop is confirmed to connect
+  and stream pose data live, but the drive/turn gains are a starting point,
+  not yet tuned against real-world measurement.
+- `app/vision/person_safety_gate.py` uses bounding-box area as a proximity
+  proxy, not true depth — conservative by design, but not a calibrated
+  metric distance.
+- The benchmark numbers in `benchmarks/*.csv` are dry-run (verification
+  decision only) unless the filename says otherwise; see
+  `run_verification_benchmark.py --help` for `--live`.
+
+## Credits
+
+- [unitreerobotics/unitree_sdk2_python](https://github.com/unitreerobotics/unitree_sdk2_python) —
+  the vendor SDK this project is built on (BSD-3-Clause, unmodified).
+- [`unitree_webrtc_connect`](vendor/unitree_webrtc_connect/README.md) —
+  vendored WebRTC client used for WiFi-hotspot connections.
+- Ultralytics YOLO, InsightFace, Faster-Whisper, OpenAI — the ML components
+  this app composes rather than retrains.
 
 ---
 
-# Installation
-## Dependencies
+## Vendor SDK Reference (original Unitree documentation)
+
+The sections below document the underlying `unitree_sdk2py` package itself
+(DDS communication, high/low-level control, examples in `example/`) and are
+unchanged from upstream.
+
+### Dependencies
 - Python >= 3.8
 - cyclonedds == 0.10.2
 - numpy
 - opencv-python
 
-### Installing from source
-Execute the following commands in the terminal:
-```bash
-cd ~
-sudo apt install python3-pip
-git clone https://github.com/unitreerobotics/unitree_sdk2_python.git
-cd unitree_sdk2_python
-pip3 install -e .
-```
-## FAQ
+### FAQ
 ##### 1. Error when `pip3 install -e .`:
 ```bash
 Could not locate cyclonedds. Try to set CYCLONEDDS_HOME or CMAKE_PREFIX_PATH
@@ -101,9 +340,9 @@ pip3 install -e .
 ```
 For details, see: https://pypi.org/project/cyclonedds/#installing-with-pre-built-binaries
 
-# Usage
+### Usage
 The Python sdk2 interface maintains consistency with the unitree_sdk2 interface, achieving robot status acquisition and control through request-response or topic subscription/publishing. Example programs are located in the `/example` directory. Before running the examples, configure the robot's network connection as per the instructions in the document at https://support.unitree.com/home/en/developer/Quick_start.
-## DDS Communication
+#### DDS Communication
 In the terminal, execute:
 ```bash
 python3 ./example/helloworld/publisher.py
@@ -113,15 +352,15 @@ Open a new terminal and execute:
 python3 ./example/helloworld/subscriber.py
 ```
 You will see the data output in the terminal. The data structure transmitted between `publisher.py` and `subscriber.py` is defined in `user_data.py`, and users can define the required data structure as needed.
-## High-Level Status and Control
+#### High-Level Status and Control
 The high-level interface maintains consistency with unitree_sdk2 in terms of data structure and control methods. For detailed information, refer to https://support.unitree.com/home/en/developer/sports_services.
-### High-Level Status
+##### High-Level Status
 Execute the following command in the terminal:
 ```bash
 python3 ./example/high_level/read_highstate.py enp2s0
 ```
 Replace `enp2s0` with the name of the network interface to which the robot is connected,.
-### High-Level Control
+##### High-Level Control
 Execute the following command in the terminal:
 ```bash
 python3 ./example/high_level/sportmode_test.py enp2s0
@@ -134,43 +373,48 @@ test.StandUpDown() # Stand up and lie down
 # test.TrajectoryFollow() # Trajectory tracking
 # test.SpecialMotions() # Special motions
 ```
-## Low-Level Status and Control
+#### Low-Level Status and Control
 The low-level interface maintains consistency with unitree_sdk2 in terms of data structure and control methods. For detailed information, refer to https://support.unitree.com/home/en/developer/Basic_services.
-### Low-Level Status
+##### Low-Level Status
 Execute the following command in the terminal:
 ```bash
 python3 ./example/low_level/lowlevel_control.py enp2s0
 ```
 Replace `enp2s0` with the name of the network interface to which the robot is connected. The program will output the state of the right front leg hip joint, IMU, and battery voltage.
-### Low-Level Motor Control
+##### Low-Level Motor Control
 First, use the app to turn off the high-level motion service (sport_mode) to prevent conflicting instructions.
 Execute the following command in the terminal:
 ```bash
 python3 ./example/low_level/lowlevel_control.py enp2s0
 ```
 Replace `enp2s0` with the name of the network interface to which the robot is connected. The left hind leg hip joint will maintain a 0-degree position (for safety, set kp=10, kd=1), and the left hind leg calf joint will continuously output 1Nm of torque.
-## Wireless Controller Status
+#### Wireless Controller Status
 Execute the following command in the terminal:
 ```bash
 python3 ./example/wireless_controller/wireless_controller.py enp2s0
 ```
 Replace `enp2s0` with the name of the network interface to which the robot is connected. The terminal will output the status of each key. For the definition and data structure of the remote control keys, refer to https://support.unitree.com/home/en/developer/Get_remote_control_status.
-## Front Camera
+#### Front Camera
 Use OpenCV to obtain the front camera (ensure to run on a system with a graphical interface, and press ESC to exit the program):
 ```bash
 python3 ./example/front_camera/camera_opencv.py enp2s0
 ```
 Replace `enp2s0` with the name of the network interface to which the robot is connected.
 
-## Obstacle Avoidance Switch
+#### Obstacle Avoidance Switch
 ```bash
 python3 ./example/obstacles_avoid_switch/obstacles_avoid_switch.py enp2s0
 ```
 Replace `enp2s0` with the name of the network interface to which the robot is connected. The robot will cycle obstacle avoidance on and off. For details on the obstacle avoidance service, see https://support.unitree.com/home/en/developer/ObstaclesAvoidClient
 
-## Light and volume control
+#### Light and volume control
 ```bash
 python3 ./example/vui_client/vui_client_example.py enp2s0
 ```
-Replace `enp2s0` with the name of the network interface to which the robot is connected.T he robot will cycle the volume and light brightness. The interface is detailed at https://support.unitree.com/home/en/developer/VuiClient
-# Robot_Go2_Unitree_Hong
+Replace `enp2s0` with the name of the network interface to which the robot is connected. The robot will cycle the volume and light brightness. The interface is detailed at https://support.unitree.com/home/en/developer/VuiClient
+
+## License
+
+The vendor SDK (`unitree_sdk2py/`, `example/`) is BSD-3-Clause, Copyright
+Unitree Robotics — see [`LICENSE`](LICENSE). The custom `app/` layer is
+original work built on top of it under the same repository.
