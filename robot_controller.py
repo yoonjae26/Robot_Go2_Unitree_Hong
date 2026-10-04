@@ -33,9 +33,15 @@ class RobotController:
     }
     """
 
-    def __init__(self, robot_ip: str = "192.168.12.1"):
+    def __init__(
+        self, robot_ip: str = "192.168.123.18", webrtc_conn=None, webrtc_loop=None,
+        telemetry=None, person_gate=None,
+    ):
         self.robot_ip = robot_ip
-        self.executor = BehaviorExecutor(robot_ip)
+        self.executor = BehaviorExecutor(
+            robot_ip, webrtc_conn=webrtc_conn, webrtc_loop=webrtc_loop, telemetry=telemetry,
+            person_gate=person_gate,
+        )
         self.registry = get_registry()
         self.library = get_library()
 

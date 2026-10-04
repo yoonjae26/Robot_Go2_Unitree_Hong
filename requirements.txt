@@ -1,0 +1,25 @@
+# Go2 Voice Control — Python dependencies
+# Python 3.10+ required (tested on 3.10.12)
+# Ubuntu 22.04 LTS (x86_64)
+
+# ── Core STT ──────────────────────────────────────────────
+faster-whisper==1.2.1
+webrtcvad==2.0.10
+sounddevice==0.5.5
+
+# ── OpenAI LLM ────────────────────────────────────────────
+openai==2.44.0
+
+# ── TTS ───────────────────────────────────────────────────
+gTTS==2.5.4
+pyttsx3==2.99
+
+# ── Unitree SDK (DDS communication) ───────────────────────
+# Install manually from source — see README
+# cyclonedds==0.10.2  (installed as dependency of unitree_sdk2py)
+
+# ── Utilities ─────────────────────────────────────────────
+numpy==2.2.6
+requests==2.34.2
+httpx==0.28.1
+pydantic==2.13.4

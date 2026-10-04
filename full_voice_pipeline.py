@@ -10,6 +10,7 @@ import os
 import tempfile
 import subprocess
 import logging
+import threading
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -19,6 +20,7 @@ from openai import OpenAI
 from realtime_stt_pipeline import RealtimeSTTPipeline
 from robot_controller import RobotController
 from voice_control_go2 import KOREAN_SYSTEM_PROMPT
+from action_merge import merge_consecutive_moves
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,11 +38,13 @@ class FullVoicePipeline:
     def __init__(
         self,
         openai_api_key: Optional[str] = None,
-        robot_ip: str = "192.168.12.1",
+        robot_ip: str = "192.168.123.18",
         model: str = "gpt-4o",
         stt_model: str = "base",
         tts_enabled: bool = True,
         tts_voice: str = "nova",
+        ptt_mode: bool = False,
+        ptt_key: str = "q",
     ):
         self.openai_api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
         if not self.openai_api_key:
@@ -50,8 +54,10 @@ class FullVoicePipeline:
         self.model = model
         self.tts_enabled = tts_enabled
         self.tts_voice = tts_voice
+        self.ptt_mode = ptt_mode
+        self.ptt_key = ptt_key
 
-        logger.info(f"Pipeline 초기화 — 모델: {model}, STT: {stt_model}, TTS: {tts_enabled}")
+        logger.info(f"Pipeline 초기화 — 모델: {model}, STT: {stt_model}, TTS: {tts_enabled}, PTT: {ptt_mode}")
 
         self.stt_pipeline = RealtimeSTTPipeline(model_name=stt_model, language="ko")
         self.robot_controller = RobotController(robot_ip=robot_ip)
@@ -90,71 +96,58 @@ class FullVoicePipeline:
     # ------------------------------------------------------------------
 
     def speak(self, text: str):
-        """OpenAI TTS API로 한국어 음성 출력"""
+        """로컬 TTS로 한국어 음성 출력 (gTTS + ffplay)"""
         if not self.tts_enabled or not text.strip():
             return
 
+        tmp_path = None
         try:
             logger.info(f"TTS: {text}")
-            response = self.openai_client.audio.speech.create(
-                model="tts-1",
-                voice=self.tts_voice,
-                input=text,
-            )
-
+            from gtts import gTTS
+            tts = gTTS(text=text, lang="ko", slow=False)
             with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
                 tmp_path = tmp.name
-                response.stream_to_file(tmp_path)
+                tts.save(tmp_path)
 
-            # Try available audio players
-            for player in ["ffplay", "mpg123", "afplay"]:
-                try:
-                    if player == "ffplay":
-                        subprocess.run(
-                            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", tmp_path],
-                            check=True, timeout=30
-                        )
-                    elif player == "mpg123":
-                        subprocess.run(["mpg123", "-q", tmp_path], check=True, timeout=30)
-                    elif player == "afplay":
-                        subprocess.run(["afplay", tmp_path], check=True, timeout=30)
-                    break
-                except (subprocess.CalledProcessError, FileNotFoundError):
-                    continue
-
+            subprocess.run(
+                ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", tmp_path],
+                check=True, timeout=30
+            )
         except Exception as e:
             logger.warning(f"TTS 오류 (계속 진행): {e}")
         finally:
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
 
     def _execute_command(self, command_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """LLM JSON → 로봇 실행 (actions 배열 순서대로)"""
-        actions: List[str] = command_dict.get("actions") or []
-        if not actions and command_dict.get("action"):
-            actions = [command_dict["action"]]
+        """LLM JSON → 로봇 실행 (actions 배열 순서대로, 객체/문자열 모두 지원)"""
+        raw_actions = command_dict.get("actions") or []
+        if not raw_actions and command_dict.get("action"):
+            raw_actions = [command_dict["action"]]
 
-        if not actions:
+        if not raw_actions:
             return {"success": False, "reason": "실행할 행동이 없습니다."}
 
+        # Merge consecutive same-direction "move" actions so the robot
+        # doesn't stop and restart its gait between steps (see action_merge.py)
+        merged_actions = merge_consecutive_moves(
+            raw_actions, command_dict, self.robot_controller.registry.get_action_name
+        )
+
         results = []
-        for action_name in actions:
-            logger.info(f"실행 중: {action_name}")
-            print(f"🤖 실행: {action_name}")
-            result = self.robot_controller.execute_action(
-                action_name,
-                speed=command_dict.get("speed", 0.5),
-                duration=command_dict.get("duration", 2.0),
-                vx=command_dict.get("vx"),
-                vy=command_dict.get("vy"),
-                omega=command_dict.get("omega"),
-            )
+        action_names = []
+        for action_name, params in merged_actions:
+            action_names.append(action_name)
+            logger.info(f"실행 중: {action_name} params={params}")
+            print(f"🤖 실행: {action_name} {params}")
+            result = self.robot_controller.execute_action(action_name, **params)
             results.append(result)
             if not result.get("success"):
                 logger.warning(f"행동 실패: {action_name} — {result.get('error')}")
@@ -162,7 +155,7 @@ class FullVoicePipeline:
 
         return {
             "success": all(r.get("success") for r in results),
-            "actions": actions,
+            "actions": action_names,
             "results": results,
         }
 
@@ -173,8 +166,11 @@ class FullVoicePipeline:
     def process_one_command(self, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
         """한 사이클: 듣기 → STT → LLM → 실행 → TTS"""
         try:
-            print("\n🎤 듣고 있습니다... (말씀하세요)")
-            user_speech = self.stt_pipeline.listen_and_transcribe(timeout=timeout)
+            if self.ptt_mode:
+                user_speech = self.stt_pipeline.listen_push_to_talk(key=self.ptt_key)
+            else:
+                print("\n🎤 듣고 있습니다... (말씀하세요)")
+                user_speech = self.stt_pipeline.listen_and_transcribe(timeout=timeout)
 
             if not user_speech:
                 print("❌ 음성이 감지되지 않았습니다.")
@@ -192,19 +188,26 @@ class FullVoicePipeline:
                 print(f"💬 {tts_text}")
 
             if command_dict.get("understood", False):
+                # TTS and robot execution run in parallel to reduce latency
+                tts_thread = threading.Thread(
+                    target=self.speak, args=(tts_text,), daemon=True
+                )
+                tts_thread.start()
+
                 exec_result = self._execute_command(command_dict)
                 command_dict["execution_result"] = exec_result
 
+                tts_thread.join()  # wait for TTS to finish before next command
+
                 if exec_result.get("success"):
                     print("✅ 완료!")
-                    self.speak(tts_text)
                 else:
-                    fail_msg = "행동을 실행할 수 없었어요."
                     print(f"⚠️  실행 실패")
-                    self.speak(fail_msg)
+                    self.speak("행동을 실행할 수 없었어요.")
             else:
                 print(f"⚠️  명령을 이해하지 못했습니다.")
-                self.speak(tts_text or "죄송해요, 다시 말씀해 주세요.")
+                if not tts_text:
+                    self.speak("죄송해요, 다시 말씀해 주세요.")
 
             command_dict["user_input"] = user_speech
             return command_dict

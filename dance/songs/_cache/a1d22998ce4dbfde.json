@@ -1,0 +1,180 @@
+{
+  "segments": [
+    {
+      "index": 0,
+      "style": "calm",
+      "beats_per_move": 8,
+      "sway_amplitude": 0.15,
+      "moves": [
+        "pose",
+        "stretch"
+      ]
+    },
+    {
+      "index": 1,
+      "style": "energetic",
+      "beats_per_move": 2,
+      "sway_amplitude": 0.35,
+      "moves": [
+        "front_jump",
+        "trot_run"
+      ]
+    },
+    {
+      "index": 2,
+      "style": "energetic",
+      "beats_per_move": 3,
+      "sway_amplitude": 0.3,
+      "moves": [
+        "front_jump",
+        "trot_run",
+        "scrape"
+      ]
+    },
+    {
+      "index": 3,
+      "style": "high_energy",
+      "beats_per_move": 2,
+      "sway_amplitude": 0.4,
+      "moves": [
+        "trot_run",
+        "front_pounce",
+        "free_bound",
+        "front_jump"
+      ]
+    },
+    {
+      "index": 4,
+      "style": "climax",
+      "beats_per_move": 2,
+      "sway_amplitude": 0.4,
+      "moves": [
+        "front_jump",
+        "free_bound",
+        "trot_run",
+        "pose"
+      ]
+    },
+    {
+      "index": 5,
+      "style": "calm",
+      "beats_per_move": 7,
+      "sway_amplitude": 0.15,
+      "moves": [
+        "pose",
+        "walk_upright"
+      ]
+    },
+    {
+      "index": 6,
+      "style": "high_energy",
+      "beats_per_move": 2,
+      "sway_amplitude": 0.35,
+      "moves": [
+        "trot_run",
+        "front_jump",
+        "free_walk",
+        "balanced_stand",
+        "walk_upright"
+      ]
+    },
+    {
+      "index": 7,
+      "style": "climax",
+      "beats_per_move": 2,
+      "sway_amplitude": 0.4,
+      "moves": [
+        "front_jump",
+        "scrape",
+        "free_bound",
+        "balanced_stand"
+      ]
+    },
+    {
+      "index": 8,
+      "style": "calm",
+      "beats_per_move": 7,
+      "sway_amplitude": 0.15,
+      "moves": [
+        "pose",
+        "walk_upright"
+      ]
+    },
+    {
+      "index": 9,
+      "style": "high_energy",
+      "beats_per_move": 2,
+      "sway_amplitude": 0.35,
+      "moves": [
+        "trot_run",
+        "front_pounce",
+        "free_walk",
+        "walk_upright"
+      ]
+    },
+    {
+      "index": 10,
+      "style": "energetic",
+      "beats_per_move": 3,
+      "sway_amplitude": 0.3,
+      "moves": [
+        "front_jump",
+        "scrape"
+      ]
+    },
+    {
+      "index": 11,
+      "style": "high_energy",
+      "beats_per_move": 2,
+      "sway_amplitude": 0.35,
+      "moves": [
+        "trot_run",
+        "front_pounce",
+        "free_bound",
+        "free_avoid"
+      ]
+    },
+    {
+      "index": 12,
+      "style": "calm",
+      "beats_per_move": 8,
+      "sway_amplitude": 0.15,
+      "moves": [
+        "pose",
+        "static_walk"
+      ]
+    },
+    {
+      "index": 13,
+      "style": "energetic",
+      "beats_per_move": 3,
+      "sway_amplitude": 0.3,
+      "moves": [
+        "front_jump",
+        "free_walk",
+        "stretch",
+        "scrape"
+      ]
+    },
+    {
+      "index": 14,
+      "style": "calm",
+      "beats_per_move": 6,
+      "sway_amplitude": 0.2,
+      "moves": [
+        "walk_upright",
+        "static_walk"
+      ]
+    },
+    {
+      "index": 15,
+      "style": "calm",
+      "beats_per_move": 7,
+      "sway_amplitude": 0.15,
+      "moves": [
+        "pose",
+        "front_pounce"
+      ]
+    }
+  ]
+}

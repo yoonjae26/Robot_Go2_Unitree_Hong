@@ -10,7 +10,7 @@ import os
 import logging
 from pathlib import Path
 
-# Add current directory to path
+# Add current directory to path 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from voice_control_go2 import VoiceControlGo2
@@ -66,7 +66,9 @@ def mode_full_pipeline(args):
         robot_ip=args.robot_ip,
         model=args.model,
         stt_model=args.stt_model,
-        tts_enabled=not args.no_tts
+        tts_enabled=not args.no_tts,
+        ptt_mode=getattr(args, "ptt", False),
+        ptt_key=getattr(args, "ptt_key", "q"),
     )
     
     if args.num_commands:
@@ -78,15 +80,15 @@ def mode_full_pipeline(args):
 def mode_test_robot(args):
     """Test robot connection and commands"""
     logger.info("Starting robot test mode")
-    
+
+    import time
+
     controller = RobotController(robot_ip=args.robot_ip)
-    
+
     try:
-        import time
-        
         print("\n🤖 Robot Test Mode")
         print("="*50)
-        
+
         # Test stand up
         print("1. Testing stand_up...")
         result = controller.execute_action("stand_up")
@@ -155,8 +157,8 @@ Examples:
     )
     parser.add_argument(
         "--robot-ip",
-        default="192.168.12.1",
-        help="Go2 robot IP address (default: 192.168.12.1)"
+        default="192.168.123.18",
+        help="Go2 robot IP address (default: 192.168.123.18)"
     )
     parser.add_argument(
         "--openai-key",
@@ -164,8 +166,8 @@ Examples:
     )
     parser.add_argument(
         "--model",
-        default="gpt-4",
-        help="OpenAI model (default: gpt-4). Options: gpt-4, gpt-3.5-turbo"
+        default="gpt-4o-mini",
+        help="OpenAI model (default: gpt-4o-mini). Options: gpt-4o-mini, gpt-4o, gpt-3.5-turbo"
     )
     parser.add_argument(
         "--stt-model",
@@ -190,6 +192,16 @@ Examples:
         "--no-tts",
         action="store_true",
         help="Disable text-to-speech feedback"
+    )
+    parser.add_argument(
+        "--ptt",
+        action="store_true",
+        help="Push-to-talk mode: press Q key to start/stop recording"
+    )
+    parser.add_argument(
+        "--ptt-key",
+        default="q",
+        help="Key for push-to-talk (default: q)"
     )
     
     args = parser.parse_args()

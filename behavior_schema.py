@@ -48,16 +48,27 @@ class Parameter:
     description: str = ""
     
     def validate(self, value: Any) -> bool:
-        """Validate parameter value"""
-        if not isinstance(value, self.type):
+        """Validate parameter value.
+
+        Numeric types (int/float) are treated as interchangeable here: JSON
+        numbers decoded from an LLM's JSON-mode output don't reliably
+        preserve the int/float distinction (e.g. `0` vs `0.0`), so a strict
+        `isinstance(value, self.type)` check would spuriously reject valid
+        values on nothing more than that formatting accident. Range checks
+        below still apply either way.
+        """
+        if self.type in (int, float):
+            if not isinstance(value, (int, float)):
+                return False
+        elif not isinstance(value, self.type):
             return False
-        
+
         if self.min_value is not None and value < self.min_value:
             return False
-        
+
         if self.max_value is not None and value > self.max_value:
             return False
-        
+
         return True
 
 
@@ -81,6 +92,12 @@ class ActionSchema:
     requires_standing: bool = False             # Must be standing first
     requires_flat_ground: bool = True           # Needs flat surface
     min_battery: float = 10.0                   # Minimum battery percentage
+    # Minimum clear distance (meters) required in front of the robot for
+    # this action to be allowed, used by the context-aware gate (V_c) for
+    # movement-type actions. None = not gated on obstacle distance. This is
+    # a controlled/test-harness-settable value (see RobotState.obstacle_distance_m),
+    # not live LIDAR fusion -- see runtime_verification.py's module docstring.
+    min_obstacle_clearance: Optional[float] = None
     
     # Parameters
     parameters: List[Parameter] = field(default_factory=list)
@@ -142,18 +159,33 @@ class RobotState:
     error_state: bool = False
     error_message: Optional[str] = None
     gait_mode: Optional[str] = None
-    
+    # Distance (meters) to the nearest known obstacle in the robot's path,
+    # for the context-aware gate's obstacle case study. None = unknown/not
+    # tracked (fail-open: actions are not obstacle-gated unless this is
+    # explicitly set), since this system has no continuous onboard
+    # obstacle-distance sensing wired into the voice-command path -- it is
+    # set deliberately by the test harness / experimenter for controlled
+    # trials. See runtime_verification.py.
+    obstacle_distance_m: Optional[float] = None
+
     def is_safe_for_action(self, action_schema: ActionSchema) -> bool:
         """Check if robot state allows this action"""
         if self.error_state:
             return False
-        
+
         if self.battery_level < action_schema.min_battery:
             return False
-        
+
         if action_schema.requires_standing and not self.is_standing:
             return False
-        
+
+        if (
+            action_schema.min_obstacle_clearance is not None
+            and self.obstacle_distance_m is not None
+            and self.obstacle_distance_m < action_schema.min_obstacle_clearance
+        ):
+            return False
+
         return True
 
 
@@ -201,6 +233,29 @@ ROTATION_PARAMETER = Parameter(
     description="Rotation speed/amount"
 )
 
+# The "move" action's real execution path (behavior_executor.py's
+# execute_action, "move" branch) reads vx/vy/omega directly and sends them
+# to SportClient.Move() -- it does NOT use SPEED_PARAMETER/DIRECTION_PARAMETER
+# below (those describe fields the executor never reads for this action).
+# Bounds are conservative estimates based on this codebase's own observed
+# operating range rather than an authoritative Unitree spec (D-pad driving
+# caps linear speed at 0.6 m/s -- dashboard_server.py's adjust_speed(); voice
+# turn commands are calibrated around omega=1.0 rad/s per voice_control_go2.py's
+# system prompt examples) -- like SPEED_LEVEL_SCHEMA elsewhere in this file,
+# treat as unverified-on-hardware defaults to tune, not a ground truth.
+VX_PARAMETER = Parameter(
+    name="vx", type=float, default=0.0, min_value=-1.0, max_value=1.0,
+    description="Forward(+)/backward(-) velocity in m/s",
+)
+VY_PARAMETER = Parameter(
+    name="vy", type=float, default=0.0, min_value=-1.0, max_value=1.0,
+    description="Left(+)/right(-) lateral velocity in m/s",
+)
+OMEGA_PARAMETER = Parameter(
+    name="omega", type=float, default=0.0, min_value=-2.0, max_value=2.0,
+    description="Yaw rotation speed in rad/s",
+)
+
 # Common action schemas
 STAND_UP_SCHEMA = ActionSchema(
     name="stand_up",
@@ -211,7 +266,6 @@ STAND_UP_SCHEMA = ActionSchema(
     duration=2.0,
     difficulty=DifficultyLevel.SAFE,
     requires_standing=False,
-    auto_stand_after=True,
     method_name="StandUp",
     voice_commands=["stand up", "get up", "stand", "please stand",
                     "일어서", "일어나", "기립", "서", "일어서봐"],
@@ -220,15 +274,17 @@ STAND_UP_SCHEMA = ActionSchema(
 STAND_DOWN_SCHEMA = ActionSchema(
     name="stand_down",
     display_name="Stand Down",
-    description="Robot lowers body to ground",
+    description="Robot lowers its whole body flat to the ground, prone/lying down (distinct from sit, which stays up on its haunches like a dog)",
     category=ActionCategory.POSTURE,
     mode_id=2,
     duration=2.0,
     difficulty=DifficultyLevel.SAFE,
     requires_standing=True,
     method_name="StandDown",
-    voice_commands=["stand down", "sit down", "lower", "crouch",
-                    "앉아", "앉아봐", "엎드려", "내려가", "숙여"],
+    # "앉아"/"앉기" (sit) deliberately NOT here -- that's genuinely "sit", now
+    # correctly mapped to SIT_SCHEMA below. This action is lying/crouching down.
+    voice_commands=["stand down", "lie down", "lower", "crouch",
+                    "엎드려", "내려가", "숙여", "누워"],
 )
 
 MOVE_SCHEMA = ActionSchema(
@@ -241,7 +297,9 @@ MOVE_SCHEMA = ActionSchema(
     difficulty=DifficultyLevel.LOW,
     requires_standing=True,
     requires_flat_ground=True,
-    parameters=[SPEED_PARAMETER, DURATION_PARAMETER, DIRECTION_PARAMETER],
+    min_obstacle_clearance=0.5,
+    parameters=[SPEED_PARAMETER, DURATION_PARAMETER, DIRECTION_PARAMETER,
+                VX_PARAMETER, VY_PARAMETER, OMEGA_PARAMETER],
     method_name="Move",
     voice_commands=["move", "go", "walk", "move forward", "move backward",
                     "앞으로", "전진", "이동", "가", "뒤로", "후진", "옆으로", "걸어"],
@@ -429,17 +487,84 @@ STOP_MOVE_SCHEMA = ActionSchema(
 
 BALANCED_STAND_SCHEMA = ActionSchema(
     name="balanced_stand",
-    display_name="Balanced Stand",
-    description="Robot stands with balance control",
+    display_name="Heart Pose (Love)",
+    description="Robot performs heart/love pose — raises front legs to form a heart shape",
     category=ActionCategory.POSTURE,
     mode_id=9,
-    duration=2.0,
+    duration=5.0,
     difficulty=DifficultyLevel.LOW,
     requires_standing=False,
     auto_stand_after=True,
-    method_name="BalanceStand",
-    voice_commands=["balance", "balanced stand",
-                    "하트", "하트 포즈", "균형", "균형 자세"],
+    method_name="Heart",
+    voice_commands=["heart", "love", "balanced stand",
+                    "하트", "하트 포즈", "러브", "사랑"],
+)
+
+HELLO_SCHEMA = ActionSchema(
+    name="hello",
+    display_name="Hello / Wave",
+    description="Robot waves a leg to greet",
+    category=ActionCategory.POSTURE,
+    mode_id=16,
+    duration=3.0,
+    difficulty=DifficultyLevel.LOW,
+    requires_standing=True,
+    method_name="Hello",
+    voice_commands=["hello", "wave", "hi", "greet",
+                    "안녕", "인사", "손 흔들어", "반가워"],
+)
+
+STRETCH_SCHEMA = ActionSchema(
+    name="stretch",
+    display_name="Stretch",
+    description="Robot performs a stretching motion",
+    category=ActionCategory.POSTURE,
+    mode_id=17,
+    duration=4.0,
+    difficulty=DifficultyLevel.LOW,
+    requires_standing=False,
+    method_name="Stretch",
+    voice_commands=["stretch", "스트레칭", "기지개"],
+)
+
+DANCE1_SCHEMA = ActionSchema(
+    name="dance1",
+    display_name="Dance 1",
+    description="Robot performs dance routine 1",
+    category=ActionCategory.POSTURE,
+    mode_id=22,
+    duration=8.0,
+    difficulty=DifficultyLevel.LOW,
+    requires_standing=True,
+    method_name="Dance1",
+    voice_commands=["dance", "dance1", "춤", "댄스", "춤춰", "춤 1", "댄스 1"],
+)
+
+DANCE2_SCHEMA = ActionSchema(
+    name="dance2",
+    display_name="Dance 2",
+    description="Robot performs dance routine 2",
+    category=ActionCategory.POSTURE,
+    mode_id=23,
+    duration=8.0,
+    difficulty=DifficultyLevel.LOW,
+    requires_standing=True,
+    method_name="Dance2",
+    voice_commands=["dance2", "춤 2", "댄스 2"],
+)
+
+FRONT_FLIP_SCHEMA = ActionSchema(
+    name="front_flip",
+    display_name="Front Flip",
+    description="Robot performs a forward somersault",
+    category=ActionCategory.FLIP_STUNT,
+    mode_id=30,
+    duration=5.0,
+    difficulty=DifficultyLevel.HIGH,
+    requires_standing=True,
+    requires_flat_ground=True,
+    method_name="FrontFlip",
+    voice_commands=["front flip", "앞 공중제비", "앞으로 뒤집어", "앞 플립"],
 )
 
 FREE_AVOID_SCHEMA = ActionSchema(
@@ -456,4 +581,189 @@ FREE_AVOID_SCHEMA = ActionSchema(
     method_name="FreeAvoid",
     voice_commands=["avoid", "free avoid", "navigate",
                     "피해", "회피", "장애물 피해"],
+)
+
+SCRAPE_SCHEMA = ActionSchema(
+    name="scrape",
+    display_name="Scrape",
+    description="Robot performs a scraping paw motion",
+    category=ActionCategory.SOCIAL,
+    mode_id=31,
+    duration=3.0,
+    difficulty=DifficultyLevel.LOW,
+    requires_standing=True,
+    method_name="Scrape",
+    voice_commands=["scrape", "긁기", "발 긁어"],
+)
+
+FRONT_JUMP_SCHEMA = ActionSchema(
+    name="front_jump",
+    display_name="Front Jump",
+    description="Robot performs a forward jump",
+    category=ActionCategory.FLIP_STUNT,
+    mode_id=32,
+    duration=3.0,
+    difficulty=DifficultyLevel.MEDIUM,
+    requires_standing=True,
+    requires_flat_ground=True,
+    method_name="FrontJump",
+    voice_commands=["front jump", "jump forward", "앞으로 점프", "앞점프"],
+)
+
+FRONT_POUNCE_SCHEMA = ActionSchema(
+    name="front_pounce",
+    display_name="Front Pounce",
+    description="Robot performs a forward pouncing motion",
+    category=ActionCategory.FLIP_STUNT,
+    mode_id=33,
+    duration=3.0,
+    difficulty=DifficultyLevel.MEDIUM,
+    requires_standing=True,
+    requires_flat_ground=True,
+    method_name="FrontPounce",
+    voice_commands=["pounce", "front pounce", "덮치기", "앞으로 덮쳐"],
+)
+
+POSE_SCHEMA = ActionSchema(
+    name="pose",
+    display_name="Pose",
+    description="Robot leans/poses its body without stepping",
+    category=ActionCategory.SOCIAL,
+    mode_id=34,
+    duration=3.0,
+    difficulty=DifficultyLevel.LOW,
+    requires_standing=True,
+    method_name="Pose",
+    voice_commands=["pose", "포즈", "몸 기울이기"],
+)
+
+TROT_RUN_SCHEMA = ActionSchema(
+    name="trot_run",
+    display_name="Trot Run",
+    description="Robot switches to a bouncy trotting gait (closest built-in match to a horse-like running step)",
+    category=ActionCategory.GAIT,
+    mode_id=35,
+    duration=3.0,
+    difficulty=DifficultyLevel.MEDIUM,
+    requires_standing=True,
+    requires_flat_ground=True,
+    method_name="TrotRun",
+    voice_commands=["trot", "trot run", "horse gait", "트롯 런", "말처럼 뛰기"],
+)
+
+STATIC_WALK_SCHEMA = ActionSchema(
+    name="static_walk",
+    display_name="Static Walk",
+    description="Robot switches to a slow, statically-stable walking gait",
+    category=ActionCategory.GAIT,
+    mode_id=36,
+    duration=3.0,
+    difficulty=DifficultyLevel.LOW,
+    requires_standing=True,
+    requires_flat_ground=True,
+    method_name="StaticWalk",
+    voice_commands=["static walk", "slow walk", "정적 보행", "천천히 걸어"],
+)
+
+SIT_SCHEMA = ActionSchema(
+    name="sit",
+    display_name="Sit",
+    description="Robot sits down on its haunches, dog-style (distinct from stand_down, which lowers the whole body to the ground)",
+    category=ActionCategory.POSTURE,
+    mode_id=37,
+    duration=2.0,
+    difficulty=DifficultyLevel.SAFE,
+    requires_standing=True,
+    method_name="Sit",
+    voice_commands=["sit", "sit down", "앉아", "앉기", "앉아봐",
+                    "엉덩이 대고 앉아", "개다리 자세로 앉아"],
+)
+
+RISE_SIT_SCHEMA = ActionSchema(
+    name="rise_sit",
+    display_name="Rise From Sit",
+    description="Robot stands back up from the sit posture (distinct from stand_up, which recovers from lying down)",
+    category=ActionCategory.POSTURE,
+    mode_id=38,
+    duration=2.0,
+    difficulty=DifficultyLevel.SAFE,
+    requires_standing=False,
+    method_name="RiseSit",
+    # Deliberately not bare "일어나"/"일어서" -- stand_up already claims those.
+    voice_commands=["rise", "stand up from sit", "앉은 데서 일어나"],
+)
+
+CONTENT_SCHEMA = ActionSchema(
+    name="content",
+    display_name="Content",
+    description="Robot performs a happy/affectionate gesture",
+    category=ActionCategory.SOCIAL,
+    mode_id=39,
+    duration=3.0,
+    difficulty=DifficultyLevel.LOW,
+    requires_standing=True,
+    method_name="Content",
+    voice_commands=["content", "happy", "애교", "기쁜 표정", "좋아하는 동작"],
+)
+
+CLASSIC_WALK_SCHEMA = ActionSchema(
+    name="classic_walk",
+    display_name="Classic Walk",
+    description="Robot switches to the classic/standard walking gait",
+    category=ActionCategory.GAIT,
+    mode_id=40,
+    duration=4.0,
+    difficulty=DifficultyLevel.LOW,
+    requires_standing=True,
+    requires_flat_ground=True,
+    method_name="ClassicWalk",
+    voice_commands=["classic walk", "normal walk", "클래식 워크", "기본 걸음", "일반 걸음"],
+)
+
+ROLL_PARAMETER = Parameter(
+    name="roll", type=float, default=0.0, min_value=-0.5, max_value=0.5,
+    description="Body roll/lean, left(-)/right(+) in radians",
+)
+PITCH_PARAMETER = Parameter(
+    name="pitch", type=float, default=0.0, min_value=-0.5, max_value=0.5,
+    description="Body pitch, nose-down(-)/nose-up(+) in radians",
+)
+YAW_PARAMETER = Parameter(
+    name="yaw", type=float, default=0.0, min_value=-0.5, max_value=0.5,
+    description="Body yaw tilt in radians",
+)
+
+EULER_SCHEMA = ActionSchema(
+    name="euler",
+    display_name="Body Tilt",
+    description="Robot tilts its body (roll/pitch/yaw) and holds the pose -- unlike Move, this does NOT auto-decay, so the executor must explicitly return it to (0, 0, 0) after `duration`",
+    category=ActionCategory.SOCIAL,
+    mode_id=41,
+    duration=2.0,
+    difficulty=DifficultyLevel.LOW,
+    requires_standing=True,
+    parameters=[ROLL_PARAMETER, PITCH_PARAMETER, YAW_PARAMETER, DURATION_PARAMETER],
+    method_name="Euler",
+    voice_commands=["tilt", "lean", "몸 기울여", "고개 숙여", "옆으로 기울여"],
+)
+
+LEVEL_PARAMETER = Parameter(
+    name="level", type=int, default=1, min_value=1, max_value=5,
+    description="Speed level (integer) -- exact valid range is NOT documented "
+                "by Unitree; 1-5 is a conservative guess, unverified on real "
+                "hardware",
+)
+
+SPEED_LEVEL_SCHEMA = ActionSchema(
+    name="speed_level",
+    display_name="Speed Level",
+    description="Sets the robot's overall gait speed level (integer), as an alternative to changing vx/vy on individual move commands -- UNVERIFIED on real hardware, test with small values first",
+    category=ActionCategory.MOVEMENT,
+    mode_id=42,
+    duration=0.5,
+    difficulty=DifficultyLevel.MEDIUM,  # untested -- effect on gait/stability not yet confirmed live
+    requires_standing=True,
+    parameters=[LEVEL_PARAMETER],
+    method_name="SpeedLevel",
+    voice_commands=["speed level", "속도 단계", "속도 레벨"],
 )

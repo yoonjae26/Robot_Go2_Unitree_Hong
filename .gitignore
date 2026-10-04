@@ -51,8 +51,20 @@ venv/
 logs/*.log
 logs/
 
-# local data and model caches
-Llama3/
+# copyrighted audio tracks used for the dance pipeline — never commit these
+app/dance/songs/*.mp3
+app/dance/songs/*.wav
+app/dance/songs/*.m4a
+app/dance/songs/_cache/
 
-# Test / experimental directories
-Test/
+# pretrained weights — ultralytics auto-downloads this on first run
+yolo11n.pt
+
+# runtime-generated analytics DB — not source, regenerated on first run
+app/analytics/analytics.db
+
+# real people's photos/names registered locally for face recognition —
+# personal data, never commit to a public repo
+app/vision/camera_vision_download/faces/
+app/vision/camera_vision_download/vision_people.xlsx
+
